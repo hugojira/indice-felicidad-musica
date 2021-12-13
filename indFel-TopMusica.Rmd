@@ -1,0 +1,240 @@
+---
+title: "Indice de felicidad y canciones"
+author: "Hugo Valenzuela"
+date: "13/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Contexto
+
+En este proyecto se busca relacionar el índice de felicidad mundial con la las propiedades de audio de las canciones mas escuchadas en los distintos países. Para esto, se usará los datos oficiales del World Happiness Report para el índice de felicidad, y de Spotify para las canciones más escuchadas y sus características.
+
+Se buscan investigar los siguientes puntos
+
+-   ¿Hay una correlación entre el índice de felicidad y la positividad/negatividad en las canciones más populares?
+-   ¿Se puede diferenciar un patrón en las canciones populares de un país en base a su índice de felicidad?
+
+
+## Librerias necesarias
+
+Librerias para correr este código
+
+```{r, message=FALSE, warning=FALSE}
+library(readr)
+library(stringr)
+library(dplyr)
+library(ggplot2)
+library(DataExplorer)
+```
+
+## Lectura de datos
+
+```{r}
+fel_top50_read <-  read_csv("./data/felicidad-top50.csv",
+                          show_col_types = FALSE)
+```
+
+### Valores perdidos
+
+Al descargarse y limpiarse los datos, se comprobó que no hubiera datos perdidos, se vuelve a hacer
+
+```{r}
+plot_missing(fel_top50_read)
+```
+
+### Eligiendo las columnas
+
+En este caso no interesa el nombre de las canciones ni los artistas, así que se procede a elegir las columnas en su mayoría numéricas del dataframe leido
+
+```{r}
+columnas_subset <- c("country.name", "ladder.score", 
+               "danceability", "energy", "loudness", 
+               "speechiness", "acousticness", "instrumentalness", 
+               "liveness", "valence", "track.duration_ms", 
+               "track.explicit")
+fel_top50_subset <- fel_top50_read[ , columnas_subset]
+```
+
+### Reformateo de columnas
+
+Cambiamos la característica de duración en milisegundos a minutos
+
+```{r}
+fel_top50_df <- fel_top50_subset %>%
+  mutate(track.duration_ms = track.duration_ms / (1000.0 * 60.)) %>%
+  plyr::rename(c("track.duration_ms" = "track.duration_min"))
+```
+
+### Diccionario de datos
+
+Un diccionario describiendo las variables puede encontrarse en el archivo ```diccionario.xlsx``` en la carpeta ```data```.
+
+## Análisis Exploratorio de Datos
+
+### Correlaciones
+
+Veamos si hay variables muy correlacionadas entre sí
+
+```{r}
+plot_correlation(fel_top50_df)
+```
+
+Se ve que la variable **energy** y **loudness** están muy correlacionadas de manera positiva, de $0.7$, por lo tanto se eliminará la columna loudness. Esto porque están siendo redundantes las dos, ya que el algoritmo de Spotify calcula la variable **energy** a partir de la sonoridad **loudness**.
+
+```{r}
+fel_top50_df <- fel_top50_df %>% select(-loudness)
+```
+
+Se ve además que ninguna variable está con correlación alta con el índice de felicidad (ladder.score).
+
+### Distribucion de las características
+
+Primero unos histogramas para tener la idea de la distribución de los datos
+
+```{r}
+plot_histogram(fel_top50_df)
+```
+
+**resumen**
+
+```{r}
+summary(fel_top50_df)
+```
+
+
+La variable **instrumentalness** parece estar muy concentrada cerca del 0 lo que indica que la gran mayoría de las canciones son con contenido de canto, veamos su boxplot 
+
+```{r}
+fel_top50_df %>% ggplot(aes(x = instrumentalness)) +
+  geom_boxplot() +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 20))
+fel_top50_df %>% ggplot(aes(x = speechiness)) +
+  geom_boxplot()
+```
+
+Y se ve también que **speechiness** tiene valores muy bajos y outliers después de $0.2$. Los valores muy bajos de speechiness e instrumentalness lo que nos indica es que la mayoría de las canciones son cantadas y no instrumentales, pues de acuerdo al diccionario de datos los valores bajos de speechiness corresponden a canciones sin palabras habladas (más canto y música) mientras que valores bajos de instrumentalness indica que las canciones tienen contenido cantado.
+
+### Redución de variables y PCA
+
+De acuerdo a lo anterior, se remueven las columnas **instrumentalness** y **speechiness** pues no servirán tanto para discriminar la instrumentalicazión o la cantidad de lo cantado en una canción.
+
+```{r}
+fel_top50_df <- fel_top50_df %>%
+  select(-c("instrumentalness", "speechiness"))
+```
+
+Ahora se aplicará un algoritmo de Análisis de Componentes Principales (PCA) para ver qué características contribuyen más a la variabilidad de los datos.
+
+Pero antes, crear un subconjunto de los datos con solamente las características numéricas
+
+```{r}
+fel_top50_num <- fel_top50_df %>%
+  select(c("danceability", "energy", "acousticness", "liveness", "valence",
+           "track.duration_min")
+         )
+```
+
+**PAC**
+
+```{r}
+plot_prcomp(fel_top50_num)
+```
+Podemos ver que las $6$ características *danceability*, *energy*, *acousticness*", "*liveness*, *valence* y *track.duration_min* explican el $71\%$ de la variabilidad de los datos en 3 componentes principales, las cuales podrían usarse en un algoritmo de aprendizaje automático supervisado.
+
+### Categorización de la variable independiente
+
+
+Ahora, para trabajar con el índice de felicidad se hacen categorías, en lugar de trabajarlo como un continuo. Esto para facilitar el análisis exploratorio con las visualizaciones. Veamos su boxplot y densidad aproximada
+
+```{r}
+fel_top50_df %>% ggplot(aes(x = ladder.score)) + 
+  geom_boxplot() + geom_density(color="blue") +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 10))
+```
+
+Se deciden hacer las categorías de acuerdo al boxplot, de la siguiente manera
+
+- **Bajo:** [mínimo, primer cuartil) 25%
+- **Medio:** [primer cuartil, tercer cuartil) 50%
+- **Alto:** [tercer cuartil, máximo] 25%
+
+así, para las categorías bajo, medio y alto quedarán el 25%, 50% y 25% de los datos, respectivamente.
+
+```{r}
+fel_top50_cat <- fel_top50_df %>%
+  mutate(fel.categoria = cut(ladder.score, 
+                             breaks = c(0, 
+                                        quantile(ladder.score)[[2]], 
+                                        quantile(ladder.score)[[4]], 
+                                        Inf),
+                            labels = c("bajo", "medio", "alto"))
+         )
+
+# las proporciones de las categorias
+
+fel_top50_cat %>% group_by(fel.categoria) %>% 
+  summarise(proporcion = n()/nrow(fel_top50_cat))
+
+```
+
+
+El dataframe ```fel_top50_cat``` servirá para trabajar en las siguientes visualizaciones. 
+
+## Visualizaciones
+
+Hacemos unos **boxplots** de acuerdo a las categorías, para ver si a simple viste puede observarse algun patrón o separación en las características.
+
+```{r}
+fel_top50_cat %>% select(-c("country.name", "ladder.score")) %>%
+  plot_boxplot(by = "fel.categoria")
+```
+
+Puede observarse que los datos están dispersos de manera muy similar al separarlos en las $3$ categorías dele índice de felicidad.
+
+Ahora, un **diagrama de dispersión** de la característica *valence* que indica la positividad, en contra del índice de felicidad *ladder.score*. 
+
+```{r}
+fel_top50_cat %>% select(c("ladder.score", "valence")) %>%
+  ggplot(aes(x = valence, y = ladder.score)) +
+  geom_point()
+```
+
+No es muy claro visualizarlo de esta manera, por lo que se toman los promedios de valence y el índice de felicidad para cada país (éste último sin promedio, es uno solo por país), teniendo
+
+```{r}
+valence_fel <- fel_top50_cat %>% select(c("ladder.score", "valence", "country.name")) %>%
+  group_by(country.name) %>%
+  summarise(mean_fel = mean(ladder.score), 
+            mean_valence = mean(valence)) 
+valence_fel %>% ggplot(aes(x = mean_valence, y = mean_fel)) + 
+  geom_point()
+```
+
+```{r, echo=FALSE, results='hide'}
+cor(valence_fel$mean_fel, valence_fel$mean_valence)
+```
+Ya se observa más separado, con una correlación de `r cor(valence_fel$mean_fel, valence_fel$mean_valence)`. 
+
+Sin embargo, claramente no es una relación lineal, por lo que sería más adecuado aplicar algún algoritmo de aprendizaje automático no supervisado, como clustering por k-medias. Por ejemplo
+
+```{r}
+km_cluster <- kmeans(cbind(valence_fel$mean_fel, valence_fel$mean_valence),
+                     centers = 3)
+valence_fel$cluster <- as.factor(km_cluster$cluster)
+valence_fel %>% ggplot(aes(x = mean_valence, y = mean_fel, color = cluster)) + 
+  geom_point()
+```
+
+Se observa que podría separarse en 3 grupos a los países, en función de su índice de felicidad y el promedio de **valence** en las 50 canciones más populares que se escuchen en dicho país.
+
+## Conclusiones
+
+Se le puede dar una respuesta inicial a los objetivos del proyecto, se observa que hay una correlación muy pequeña de `r cor(valence_fel$mean_fel, valence_fel$mean_valence)` entre el índice de felicidad y la positividad/negatividad en las canciones, que está dada por la característica *valence*.
+
+Por otra parte, se observa una relación no lineal entre el índice de felicidad y el promedio de *valence* de las 50 canciones más escuchadas de cada país, y se puede hacer una separación por clusters de k-medias. Para este caso se vió que agrupar en 3 es adecuado.
+
+Por último, para involucrar a las demás características numéricas restantes como *energy* o *acousticness*, lo que puede hacerse es aplicar algún algoritmo de clasificación tomando como base las clases creadas para el índice de felicidad, de bajo, medio, alto. Un algoritmo adecuado podría ser el de *k vecinos más cercanos* o bien algún algoritmo estadística de clasificación o de inferencia con lógica difusa. Un algoritmo como redes neuronales artificiales no sería muy adecuado por los pocos datos que se tienen.

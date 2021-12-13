@@ -1,0 +1,253 @@
+---
+title: "Indice de felicidad y canciones (obtención de datos)"
+author: "Hugo Valenzuela"
+date: "13/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Contexto
+
+En este proyecto se busca relacionar el índice de felicidad mundial con la las propiedades de audio de las canciones mas escuchadas en los distintos países. Para esto, se usará los datos oficiales del World Happiness Report para el índice de felicidad, y de Spotify para las canciones más escuchadas y sus características.
+
+Se buscan investigar los siguientes puntos
+
+-   ¿Hay una correlación entre el índice de felicidad y la positividad/negatividad en las canciones más populares?
+-   ¿Se puede diferenciar un patrón en las canciones populares de un país en base a su índice de felicidad?
+
+
+## Librerias necesarias
+
+Librerias para correr este código
+
+```{r, message=FALSE, warning=FALSE}
+library(readr)
+library(readxl)
+library(stringr)
+library(dplyr)
+library(spotifyr)
+library(DataExplorer)
+```
+
+## Obtención de los datos
+
+### Datos sobre el índice de felicidad
+
+Primeramente, se descargan los datos del ranking de felicidad, desde el sitio oficial del **World Happiness Report 2021**.
+
+Se descargan como archivo primero
+
+```{r, message=FALSE}
+file_url <- "https://happiness-report.s3.amazonaws.com/2021/DataForFigure2.1WHR2021C2.xls"
+file_destination <- "./data/indice_felicidad_2021.xls"
+
+if (file.exists(file_destination)) {
+   print(paste("The file already exists:", file_destination))
+} else {
+   download.file(url = file_url, destfile = file_destination)
+}
+```
+
+Leer en objeto de R
+
+```{r}
+felicidad_raw <- read_excel("./data/indice_felicidad_2021.xls",sheet = 1)
+```
+
+Para este caso solo se ocupan las primeras 3 columnas, que son **Country name**, **Regional indicator** y **Ladder score**; las cuales indican el país, región y el índice de felicidad, respectivamente.
+
+```{r}
+felicidad_df <- felicidad_raw %>% select(1:3) %>%
+  plyr::rename(c("Country name" = "country.name",
+         "Regional indicator" = "regional.indicator",
+         "Ladder score" = "ladder.score"))
+length(unique(felicidad_df$country.name))
+```
+
+Rápidamente podemos ver que tenemos datos de `r length(unique(felicidad_df$country.name))` países distintos.
+
+#### Valores perdidos
+
+Inspección de valores perdidos
+
+```{r}
+plot_missing(felicidad_df)
+```
+
+Por lo que no hay valores perdidos en los datos que se usaran para el índice de felicidad.
+
+### Datos sobre los éxitos musicales
+
+Para obtener los datos de las características de audio, de las canciones de cada país más escuchadas, se usará la API Web de Spotify.
+
+Primeramente, se hace la autenticación para obtener el token de accesso
+
+```{r}
+access_token <- get_spotify_access_token(
+  client_id = Sys.getenv("SPOTIFY_CLIENT_ID"), 
+  client_secret = Sys.getenv("SPOTIFY_CLIENT_SECRET")
+)
+```
+
+Las **playlists de Hits** que se usarán en este proyecto tienen la forma ```Top 50 - PAIS```, donde *PAIS* es el nombre del país. Lo que se hará es extraer los países del conjunto de datos del índice de felicidad y después hacer consultas a la API de Spotify.
+
+Ahora, es posible que no todos los países tengan una playlist, pues se busca que sean exclusivamente playlists hechas por Spotify y no por usuarios.
+
+**playlists**
+
+```{r}
+# cambiar el nombre de los emiratos arabes unidos a como aparece
+# en Spotify: United Arab Emirates --> UAE
+felicidad_df <- felicidad_df %>% 
+  mutate(country.name = str_replace(country.name,"United Arab Emirates", "UAE"))
+
+# vector de paises
+paises <- felicidad_df$country.name
+# dandole forma a los nombres que deben tener los playlists
+playlists_nombres <- paste("Top 50", "-", paises)
+```
+
+**Obtener información de las playlists**
+
+Hacer consulta a la API para obtener información de las playlists
+
+```{r}
+search_response <- lapply(1:length(playlists_nombres), function(i) {
+  search_spotify(q = playlists_nombres[i], type = "playlist", 
+                 authorization = access_token, 
+                 limit = 5)
+}
+)
+```
+
+**Extraer IDs de la información**
+
+Ahora, se extraen los Spotify IDs dee la respuesta de la API sobre la información de las playlists. Se verifica además de que sean las playlists creadas por Spotify, esto debido a que las creadas por Spotify estan basadas en lo que los usuarios más escuchan, en cambio las creadas por usuarios pueden modificarse a gusto.
+
+
+```{r}
+# extraer los playlists creados por Spotify
+search_response_ID <- bind_rows(search_response) %>% 
+     filter(name %in% playlists_nombres & owner.display_name == "Spotify")
+nrow(search_response_ID)
+# extraer los ids
+playlists_IDs <- as.character(unlist(search_response_ID$id))
+head(playlists_IDs, 10)
+```
+Para este momento vemos que tenemos datos de playlists para `r nrow(search_response_ID)` de los `r length(unique(felicidad_df$country.name))` países.
+
+**Características de audio**
+
+Ahora que tenemos los Spotify IDs de las playlists, podemos hacer una consulta a la API para obtener las características de audio. Así
+
+```{r}
+features_response <- lapply(1:length(playlists_IDs), function(i) {
+  get_playlist_audio_features("Spotify", playlists_IDs[i], 
+                 authorization = access_token
+                 )
+}
+)
+```
+
+Concatenando los tibbles en uno solo
+
+```{r}
+playlists_features <- bind_rows(features_response)
+```
+
+Se eligen las columnas que podrán ser de utilidad para esta aplicación
+
+```{r}
+columnas <- c("playlist_id", "playlist_name", 
+              "playlist_owner_name", "playlist_owner_id",
+               "danceability", "energy", "key", "loudness", 
+               "mode", "speechiness", "acousticness", "instrumentalness", 
+               "liveness", "valence", "tempo", "track.id",
+              "time_signature", "added_at", "track.artists", 
+              "track.duration_ms", "track.explicit",
+              "track.name", "track.popularity")
+playlists_features_df <- playlists_features[ , columnas]
+dim(playlists_features_df)
+```
+
+La columna de artistas tiene dataframes anidados, entonces se deben extraer los nombres de los artistas para dejarlos como una columna de caracter
+
+```{r}
+top50_paises <- playlists_features_df %>% 
+   mutate(track.artists = lapply(1:nrow(playlists_features_df), function(i){
+      playlists_features_df$track.artists[[i]][[3]]
+   })
+   ) %>% 
+   mutate(track.artists = as.character(track.artists))
+dim(top50_paises)
+```
+
+Las dimensiones del dataframe que tiene las características de audio es de `r dim(top50_paises)``.
+
+#### Valores perdidos
+
+```{r}
+plot_missing(top50_paises)
+```
+
+Podemos ver que no hay valores perdidos en los datos de las canciones, es conveniente.
+
+## Juntando los dos conjuntos de datos en uno tidy
+
+Ahora bien, ya tenemos dos dataframes, uno con los datos del índice de felicidad y otro con las características de los top 50 de algunos países. Debemos juntarlos en un solo dataframe para tener un dataframe en tidy.
+
+Primero, le damos formato a los nombres de las playlists para que tengan el mismo nombre que los países en el dataframe del índice de felicidad. Esto nos permitirá después hacer un inner join de los dos conjuntos de datos en base a los países.
+
+```{r}
+top50_paises_df <- top50_paises %>%
+  mutate(country = str_replace_all(playlist_name, 
+                                         "Top 50 - ", 
+                                         "")
+         )
+```
+
+### Conjunto de datos TIDY
+**Inner Join**
+
+```{r}
+fel_top50_df <- inner_join(felicidad_df, top50_paises_df,
+                        by= c("country.name" = "country"))
+length(unique(fel_top50_df$country.name))
+```
+
+Entonces, vemos que se tienen datos de `r length(unique(fel_top50_df$country.name))` países, con lo que se podrá trabajar en el análisis exploratorio de datos.
+
+Las columnas del dataframe tidy son entonces
+
+```{r}
+glimpse(fel_top50_df)
+```
+#### Valores perdidos
+Por último, corroboramos que no haya datos faltantes después de hace el inner join
+
+```{r}
+plot_missing(fel_top50_df)
+```
+
+### Exportando los datos tidy 
+
+Se exporta el conjunto de datos tidy obtenido, en un formato ```.csv```
+
+```{r}
+file.output <- "./data/felicidad-top50.csv"
+
+if (file.exists(file.output)) {
+   print(paste("The file already exists:", file.output))
+} else {
+   write_csv(fel_top50_df, file = file.output)
+}
+```
+
+### Diccionario de datos
+
+Un diccionario describiendo las variables puede encontrarse en el archivo ```diccionario.xlsx``` en la carpeta ```data```.
+
+----------------------------------------------------------------
