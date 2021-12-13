@@ -16,4 +16,4 @@ Se tienen **3 archivos**, cada uno cuenta con su R markdown así como su salida 
 
 ## Datos
 
-Se generó un archivo en forma tidy con varias características en ```./data/felicidad.top50.csv```, puede reducirse más en base a la aplicación que se desee hacer.
+Se generó un archivo en forma tidy con varias características en ```./data/felicidad-top50.csv```, puede reducirse más en base a la aplicación que se desee hacer.
